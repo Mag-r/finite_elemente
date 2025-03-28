@@ -1,0 +1,8 @@
+/duneproject
+/fem_tutorial
+/zoltan
+/ZoltanDist
+*.sh
+*.log
+*.vtu
+*.pvtu
