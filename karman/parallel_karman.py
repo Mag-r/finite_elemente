@@ -17,7 +17,7 @@ rho = dune.ufl.Constant(1, "rho")
 dt = dune.ufl.Constant(0.02, "dt")
 
 class NavierStokesSolver:
-    def __init__(self, gridView, order, mu, rho, dt):
+    def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5):
         self.gridView = gridView
         self.order = order
         self.mu = mu
@@ -28,8 +28,8 @@ class NavierStokesSolver:
         print(self.gridView.size(0))
         # self.gridView.plot() if comm.rank == 0 else None
         self.init()
-        self.vtk = self.gridView.sequencedVTK("karman", pointdata=[self.composite_solution[:self.indices_split], self.composite_solution[self.indices_split:]])
-
+        self.vtk = self.gridView.sequencedVTK("karman", pointdata=[self.composite_solution])
+        self.max_refinement_level = max_refinement_level
 
     def init(self):
         self.V_space = lagrange(self.gridView, order=self.order, dimRange=self.gridView.dimension) # p1Bubble als alternative
@@ -51,6 +51,20 @@ class NavierStokesSolver:
         self.u_old = self.V_space.function(name="u_old")
         self.p_old = self.P_space.function(name="p_old")
         self.indices_split = self.u_old.as_numpy.shape[0]
+        self.element_storage = fem.space.finiteVolume(self.gridView)
+
+    def adapt(self):
+        curl = ufl.curl(ufl.as_vector([self.composite_solution[0], self.composite_solution[1]]))
+        curl = ufl.inner(curl, curl)
+        curl = self.element_storage.interpolate(curl, name="curl")
+        min_curl = np.min(curl.as_numpy)
+        max_curl = np.max(curl.as_numpy)
+        if max_curl > min_curl:
+            curl.as_numpy[:] -= min_curl
+            curl.as_numpy[:] /= (max_curl - min_curl)
+        fem.mark(curl,refineTolerance=0.75, coarsenTolerance=0.25, maxLevel=self.max_refinement_level)
+        fem.adapt([self.composite_solution, self.u_old, self.p_old])
+        self.indices_split = self.u_old.as_numpy.shape[0]
 
     def generate_navier_stokes_schemes(self, velocity_boundary_condition, pressure_boundary_condition, neumann_boundary_form):
         self.epsilon = lambda w:  1/2*(ufl.nabla_grad(w) + ufl.nabla_grad(w).T)
@@ -70,10 +84,10 @@ class NavierStokesSolver:
         params = {"nonlinear.verbose": True,
                   "linear.verbose": True,
         }
-        self.step_one_scheme = fem.scheme.galerkin([step_one_form == 0, *velocity_boundary_condition],solver="gmres")
+        self.step_one_scheme = fem.scheme.galerkin([step_one_form == 0, *velocity_boundary_condition], solver="gmres")
         self.step_two_scheme = fem.scheme.galerkin([step_two_form == 0, *pressure_boundary_condition], solver="gmres")
         self.step_three_scheme = fem.scheme.galerkin([step_three_form == 0, *velocity_boundary_condition], solver="gmres")
-
+        
 
     def perform_one_step(self):
         self.step_one_scheme.solve(target=self.composite_solution)
@@ -93,6 +107,7 @@ class NavierStokesSolver:
             if time_between_plots is not None and self.t.value >= next_plot_time:
                 next_plot_time += time_between_plots
                 self.vtk()
+                self.adapt()
                 dune.fem.loadBalance([self.composite_solution, self.u_old, self.p_old])
 
       
@@ -111,9 +126,10 @@ with pygmsh.occ.Geometry() as geom:
               "simplices": cells["triangle"].astype(int)}
 lb_method = 9
 vortex_street_grid = leafGridView(domain, dimgrid=2, lbMethod = lb_method) if comm.rank == 0 else leafGridView({"vertices":[], "cubes":[]}, dimgrid=2, lbMethod = lb_method)
+vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
 vortex_street_grid.hierarchicalGrid.globalRefine(4)
 mu.value = 1E-3
-dt.value = 5E-3
+dt.value = 5E-5
 vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt)
 no_slip_bottom = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [0, 0, None], vortex_solver.x[1] < 1e-10)
 no_slip_top = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [0, 0, None], vortex_solver.x[1] > H - 1e-10)
@@ -123,7 +139,8 @@ pressure_dirichlet_right = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoo
 neumann_boundary_form_right = ufl.inner(
         ufl.dot(ufl.nabla_grad(vortex_solver.u), vortex_solver.n)*vortex_solver.mu - vortex_solver.p * vortex_solver.n, vortex_solver.v
     ) * ufl.conditional(ufl.gt(vortex_solver.x[0], L - 1e-10), 1, 0) * ufl.ds
-velocity_inflow_boundary = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [(6 * vortex_solver.x[1]*(H-vortex_solver.x[1]))/np.pow(H,2) * 0.01, 0, None], vortex_solver.x[0] < 1e-10)
+
+velocity_inflow_boundary = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [(6 * vortex_solver.x[1]*(H-vortex_solver.x[1]))/np.pow(H,2) * 0.001, 0, None], vortex_solver.x[0] < 1e-10)
 
 vortex_solver.generate_navier_stokes_schemes([no_slip_bottom, no_slip_top, no_slip_cylinder, velocity_inflow_boundary], [pressure_dirichlet_right], neumann_boundary_form_right)
 
