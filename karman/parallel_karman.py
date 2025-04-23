@@ -10,6 +10,7 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 import pygmsh
 from dune.common import comm
+from dune.fem.scheme import galerkin as solutionScheme
 
 fem.threading.use = int(4/comm.size)
 mu  = dune.ufl.Constant(1, "mu")
@@ -48,7 +49,7 @@ class NavierStokesSolver:
 
         self.f = dune.ufl.Constant((0, 0), "f")
         self.composite_solution = self.compositeTaylorHoodSpace.function(name="solution")
-        self.u_old = self.V_space.function(name="u_old")
+        self.u_old = self.V_space.function(name="u_old") # ist so Nullfunktion? Dann anders initialieren
         self.p_old = self.P_space.function(name="p_old")
         self.indices_split = self.u_old.as_numpy.shape[0]
         self.element_storage = fem.space.finiteVolume(self.gridView)
@@ -74,7 +75,7 @@ class NavierStokesSolver:
         + ufl.inner(self.sigma, self.epsilon(self.v)) * ufl.dx
         - ufl.inner(self.f, self.v) * ufl.dx
         + self.rho * ufl.inner(ufl.dot(self.u_old, ufl.nabla_grad(self.u_old)), self.v) * ufl.dx 
-    )
+        )
         
         step_one_form -= neumann_boundary_form
 
@@ -137,10 +138,21 @@ no_slip_cylinder = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, 
 
 pressure_dirichlet_right = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [None, None, 0.0], vortex_solver.x[0] > L - 1e-10)
 neumann_boundary_form_right = ufl.inner(
-        ufl.dot(ufl.nabla_grad(vortex_solver.u), vortex_solver.n)*vortex_solver.mu - vortex_solver.p * vortex_solver.n, vortex_solver.v
+        ufl.dot(ufl.nabla_grad(vortex_solver.u).T, vortex_solver.n)*vortex_solver.mu - vortex_solver.p * vortex_solver.n, vortex_solver.v
     ) * ufl.conditional(ufl.gt(vortex_solver.x[0], L - 1e-10), 1, 0) * ufl.ds
+velocity_inflow_boundary = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [(6 * vortex_solver.x[1]*(H-vortex_solver.x[1]))/np.pow(H,2), 0, None], vortex_solver.x[0] < 1e-10)
 
-velocity_inflow_boundary = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [(6 * vortex_solver.x[1]*(H-vortex_solver.x[1]))/np.pow(H,2) * 0.001, 0, None], vortex_solver.x[0] < 1e-10)
+
+# Compute solution of Quasi Navier Stokes on the karman street.
+epsilon = lambda w:  1/2*(ufl.nabla_grad(w) + ufl.nabla_grad(w).T)
+sigma = -vortex_solver.p*ufl.Identity(vortex_solver.gridView.dimension) + 2*vortex_solver.mu*epsilon(vortex_solver.u)
+quasi_stokes = rho*ufl.dot(vortex_solver.u, vortex_solver.v)*ufl.dx + ufl.inner(sigma, epsilon(vortex_solver.v))*ufl.dx + ufl.div(vortex_solver.u)*vortex_solver.q*ufl.dx
+quasi_stokes_scheme = solutionScheme([quasi_stokes == 0, no_slip_top, no_slip_bottom, no_slip_cylinder, velocity_inflow_boundary], solver = "gmres")
+solution_quasi_stokes = vortex_solver.compositeTaylorHoodSpace.function(name="solution_quasi_stokes")
+quasi_stokes_scheme.solve(target=solution_quasi_stokes)
+solution_quasi_stokes[2].plot()
+vortex_solver.u_old.as_numpy[:] = solution_quasi_stokes.as_numpy[:vortex_solver.indices_split]
+vortex_solver.p_old.as_numpy[:] = solution_quasi_stokes.as_numpy[vortex_solver.indices_split:]
 
 vortex_solver.generate_navier_stokes_schemes([no_slip_bottom, no_slip_top, no_slip_cylinder, velocity_inflow_boundary], [pressure_dirichlet_right], neumann_boundary_form_right)
 
