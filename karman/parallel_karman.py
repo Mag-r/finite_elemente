@@ -12,7 +12,6 @@ import pygmsh
 from dune.common import comm
 from dune.fem.scheme import galerkin as solutionScheme
 
-fem.threading.use = int(4/comm.size)
 mu  = dune.ufl.Constant(1, "mu")
 rho = dune.ufl.Constant(1, "rho")
 dt = dune.ufl.Constant(0.02, "dt")
@@ -58,8 +57,8 @@ class NavierStokesSolver:
         curl = ufl.curl(ufl.as_vector([self.composite_solution[0], self.composite_solution[1]]))
         curl = ufl.inner(curl, curl)
         curl = self.element_storage.interpolate(curl, name="curl")
-        min_curl = np.min(curl.as_numpy)
-        max_curl = np.max(curl.as_numpy)
+        min_curl = comm.sum(np.min(curl.as_numpy))
+        max_curl = comm.sum(np.max(curl.as_numpy))
         if max_curl > min_curl:
             curl.as_numpy[:] -= min_curl
             curl.as_numpy[:] /= (max_curl - min_curl)
@@ -128,7 +127,7 @@ with pygmsh.occ.Geometry() as geom:
 lb_method = 9
 vortex_street_grid = leafGridView(domain, dimgrid=2, lbMethod = lb_method) if comm.rank == 0 else leafGridView({"vertices":[], "cubes":[]}, dimgrid=2, lbMethod = lb_method)
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
-vortex_street_grid.hierarchicalGrid.globalRefine(4)
+vortex_street_grid.hierarchicalGrid.globalRefine(2)
 mu.value = 1E-3
 dt.value = 5E-5
 vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt)
@@ -143,17 +142,20 @@ neumann_boundary_form_right = ufl.inner(
 velocity_inflow_boundary = dune.ufl.DirichletBC(vortex_solver.compositeTaylorHoodSpace, [(6 * vortex_solver.x[1]*(H-vortex_solver.x[1]))/np.pow(H,2), 0, None], vortex_solver.x[0] < 1e-10)
 
 
-# Compute solution of Quasi Navier Stokes on the karman street.
+print("Calculating initial velocity field")
 epsilon = lambda w:  1/2*(ufl.nabla_grad(w) + ufl.nabla_grad(w).T)
 sigma = -vortex_solver.p*ufl.Identity(vortex_solver.gridView.dimension) + 2*vortex_solver.mu*epsilon(vortex_solver.u)
 quasi_stokes = rho*ufl.dot(vortex_solver.u, vortex_solver.v)*ufl.dx + ufl.inner(sigma, epsilon(vortex_solver.v))*ufl.dx + ufl.div(vortex_solver.u)*vortex_solver.q*ufl.dx
-quasi_stokes_scheme = solutionScheme([quasi_stokes == 0, no_slip_top, no_slip_bottom, no_slip_cylinder, velocity_inflow_boundary], solver = "gmres")
+params = {"nonlinear.verbose": False,
+                  "linear.verbose": False,
+        }
+quasi_stokes_scheme = solutionScheme([quasi_stokes == 0, no_slip_top, no_slip_bottom, no_slip_cylinder, velocity_inflow_boundary], solver = "gmres", parameters = params)
 solution_quasi_stokes = vortex_solver.compositeTaylorHoodSpace.function(name="solution_quasi_stokes")
 quasi_stokes_scheme.solve(target=solution_quasi_stokes)
-solution_quasi_stokes[2].plot()
+
 vortex_solver.u_old.as_numpy[:] = solution_quasi_stokes.as_numpy[:vortex_solver.indices_split]
 vortex_solver.p_old.as_numpy[:] = solution_quasi_stokes.as_numpy[vortex_solver.indices_split:]
-
+print("init schemes")
 vortex_solver.generate_navier_stokes_schemes([no_slip_bottom, no_slip_top, no_slip_cylinder, velocity_inflow_boundary], [pressure_dirichlet_right], neumann_boundary_form_right)
-
+print("integrating")
 vortex_solver.integrate(t_end, time_between_plots=0.001)
