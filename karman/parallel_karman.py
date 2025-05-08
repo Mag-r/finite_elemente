@@ -25,12 +25,13 @@ class NavierStokesSolver:
         self.t = dune.ufl.Constant(0, name="time")
         # self.gridView.plot() if comm.rank == 0 else None
         self.setup_space()
-        self.vtk = self.gridView.sequencedVTK(
-            "karman", pointdata=[self.solution_u, self.solution_p]
-        )
         self.max_refinement_level = max_refinement_level
         self.gridView.hierarchicalGrid.loadBalance()
         dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
+        self.curl = self.calc_curl()
+        self.vtk = self.gridView.sequencedVTK(
+            "karman", pointdata=[self.solution_u, self.solution_p, self.curl],
+        )
         print(self.gridView.size(0))
         self.vtk()
 
@@ -53,6 +54,7 @@ class NavierStokesSolver:
         self.f = dune.ufl.Constant((0, 0), "f")
         self.u_old = self.V_space.function(name="u_old")
         self.p_old = self.P_space.function(name="p_old")
+        self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
 
         try:
             self.u_old.as_numpy[:] = (
@@ -63,7 +65,7 @@ class NavierStokesSolver:
             )
         except Exception as e:
             print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
-            compute_quasi_stokes(self.rho, self, order=self.order)
+            compute_quasi_stokes(self.rho, self, order=self.order) if comm.rank == 0 else None
             self.u_old.as_numpy[:] = (
                 np.load("initial_velocity.npy") if comm.rank == 0 else None
             )
@@ -75,25 +77,33 @@ class NavierStokesSolver:
         self.element_storage = fem.space.finiteVolume(self.gridView)
 
     def adapt(self):
+        curl = self.calc_curl()
+        [refined, coarsened] = fem.mark(
+            indicator=curl,
+            refineTolerance=0.075,
+            coarsenTolerance=0.01,
+            maxLevel=self.max_refinement_level,
+            minLevel=2,
+            markNeighbors=True,
+            gridView=self.gridView,
+        )
+        print(f"element counts:{self.gridView.size(0), self.solution_u.size}")
+        print(
+            f"Refining {refined} cells, coarsening {coarsened} cells")
+        fem.adapt([self.solution_u, self.solution_p, self.u_old, self.p_old])
+
+    def calc_curl(self):
         curl = ufl.curl(ufl.as_vector([self.solution_u[0], self.solution_u[1]]))
-        curl = ufl.inner(curl, curl)
+        curl = ufl.sqrt(ufl.inner(curl, curl))
         curl = self.element_storage.interpolate(curl, name="curl")
+
         min_curl = comm.min(np.min(np.abs(curl.as_numpy)))
         max_curl = comm.max(np.max(np.abs(curl.as_numpy)))
         if max_curl > min_curl:
             curl.as_numpy[:] -= min_curl
             curl.as_numpy[:] /= max_curl - min_curl
-        [refined, coarsened] = fem.mark(
-            curl,
-            refineTolerance=0.5,
-            coarsenTolerance=0.25,
-            maxLevel=self.max_refinement_level,
-            minLevel=2,
-        )
-        print((curl.as_numpy>0.5).sum(), (curl.as_numpy<0.25).sum())
-        print(
-            f"Refining {refined} cells, coarsening {coarsened} cells, max curl: {max_curl}, min curl: {min_curl}")
-        fem.adapt([self.solution_u, self.solution_p, self.u_old, self.p_old])
+        print(f"max curl: {max_curl}, min curl: {min_curl}")
+        return curl
 
     def generate_navier_stokes_schemes(
         self,
@@ -163,15 +173,16 @@ class NavierStokesSolver:
             self.t.value += self.dt.value
             self.perform_one_step()
             progress_bar.update(self.dt.value) if comm.rank == 0 else None
+            
             if time_between_plots is not None and self.t.value >= next_plot_time:
                 next_plot_time += time_between_plots
+                self.curl.as_numpy[:] = self.calc_curl().as_numpy[:]
                 self.vtk()
                 self.adapt()
                 dune.fem.loadBalance([self.solution_p, self.solution_u, self.u_old, self.p_old])
 
 
 def compute_quasi_stokes(rho, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
-    assert comm.size == 1, "Quasi-stokes solver only works in serial"
     print("computing quasi-stokes")
     grid = vortex_solver.gridView
     space_u = lagrange(grid, order=order, dimRange=2)
@@ -260,7 +271,7 @@ vortex_street_grid = (
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
 vortex_street_grid.hierarchicalGrid.globalRefine(4)
 mu.value = 1e-3
-dt.value = 5e-4
+dt.value = 5e-5
 vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt,max_refinement_level=6)
 no_slip_bottom = dune.ufl.DirichletBC(
     vortex_solver.V_space, [0, 0], vortex_solver.x_u[1] < 1e-10
