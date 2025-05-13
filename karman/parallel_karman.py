@@ -143,7 +143,7 @@ class NavierStokesSolver:
             "nonlinear.verbose": False,
             "linear.verbose": False,
             # "linear.tolerance": 1e-6,
-            # "linear.preconditioning": "gauss-seidel",
+            "linear.preconditioning.method": "gauss-seidel",
         }
         self.step_one_scheme = fem.scheme.galerkin(
             [step_one_form == 0, *velocity_boundary_condition],
