@@ -11,13 +11,13 @@ from dune.grid import cartesianDomain
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import sys
-try:
-    import petsc4py
-    petsc4py.init(sys.argv)
-    from petsc4py import PETSc
-except ImportError:
-    print("Example requires `petsc4py` - skipping")
-    sys.exit(0)
+# try:
+#     import petsc4py
+#     petsc4py.init(sys.argv)
+#     from petsc4py import PETSc
+# except ImportError:
+#     print("Example requires `petsc4py` - skipping")
+#     sys.exit(0)
 
 # from dune.common.checkconfiguration import assertCMakeHave, ConfigurationError
 # try:
@@ -54,9 +54,9 @@ class NavierStokesSolver:
         self.vtk()
 
     def setup_space(self):
-        self.V_space = lagrange(self.gridView, order=self.order, dimRange=self.gridView.dimension, storage='petsc')
+        self.V_space = lagrange(self.gridView, order=self.order, dimRange=self.gridView.dimension) #, storage='petsc'
         # pressure space
-        self.P_space = lagrange(self.gridView, order=self.order - 1, storage='petsc')
+        self.P_space = lagrange(self.gridView, order=self.order - 1) #, storage='petsc'
         self.x_u = ufl.SpatialCoordinate(self.V_space)
         self.n_u = ufl.FacetNormal(self.V_space)
         self.u = ufl.TrialFunction(self.V_space)
@@ -73,23 +73,24 @@ class NavierStokesSolver:
         self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
 
         try:
-            self.u_old.as_petsc[:] = (
+            self.u_old.as_numpy[:] = (
                 np.load("initial_velocity.npy") if comm.rank == 0 else None
             )
-            self.p_old.as_petsc[:] = (
+            #assign( #apy
+            self.p_old.as_numpy[:] = (
                 np.load("initial_pressure.npy") if comm.rank == 0 else None
             )
         except Exception as e:
             print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
             compute_quasi_stokes(self.rho, self, order=self.order) if comm.rank == 0 else None
-            self.u_old.as_petsc[:] = (
+            self.u_old.as_numpy[:] = (
                 np.load("initial_velocity.npy") if comm.rank == 0 else None
             )
-            self.p_old.as_petsc[:] = (
+            self.p_old.as_numpy[:] = (
                 np.load("initial_pressure.npy") if comm.rank == 0 else None
             )
-        self.solution_u.as_petsc[:] = self.u_old.as_petsc[:]
-        self.solution_p.as_petsc[:] = self.p_old.as_petsc[:]
+        self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
+        self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
         self.element_storage = fem.space.finiteVolume(self.gridView)
 
     def adapt(self):
@@ -113,11 +114,11 @@ class NavierStokesSolver:
         curl = ufl.sqrt(ufl.inner(curl, curl))
         curl = self.element_storage.interpolate(curl, name="curl")
 
-        min_curl = comm.min(np.min(np.abs(curl.as_petsc)))
-        max_curl = comm.max(np.max(np.abs(curl.as_petsc)))
+        min_curl = comm.min(np.min(np.abs(curl.as_numpy)))
+        max_curl = comm.max(np.max(np.abs(curl.as_numpy)))
         if max_curl > min_curl:
-            curl.as_petsc[:] -= min_curl
-            curl.as_petsc[:] /= max_curl - min_curl
+            curl.as_numpy[:] -= min_curl
+            curl.as_numpy[:] /= max_curl - min_curl
         print(f"max curl: {max_curl}, min curl: {min_curl}")
         return curl
 
@@ -161,17 +162,17 @@ class NavierStokesSolver:
         }
         self.step_one_scheme = fem.scheme.galerkin(
             [step_one_form == 0, *velocity_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
         self.step_two_scheme = fem.scheme.galerkin(
             [step_two_form == 0, *pressure_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
         self.step_three_scheme = fem.scheme.galerkin(
             [step_three_form == 0, *velocity_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
 
@@ -179,8 +180,8 @@ class NavierStokesSolver:
         self.step_one_scheme.solve(target=self.solution_u)
         self.step_two_scheme.solve(target=self.solution_p)
         self.step_three_scheme.solve(target=self.solution_u)
-        self.p_old.as_petsc[:] = self.solution_p.as_petsc[:]
-        self.u_old.as_petsc[:] = self.solution_u.as_petsc[:]
+        self.p_old.as_numpy[:] = self.solution_p.as_numpy[:]
+        self.u_old.as_numpy[:] = self.solution_u.as_numpy[:]
 
     def integrate(self, endTime, time_between_plots=None):
         next_plot_time = 0
@@ -192,7 +193,7 @@ class NavierStokesSolver:
             
             if time_between_plots is not None and self.t.value >= next_plot_time:
                 next_plot_time += time_between_plots
-                self.curl.as_petsc[:] = self.calc_curl().as_petsc[:]
+                self.curl.as_numpy[:] = self.calc_curl().as_numpy[:]
                 self.vtk()
                 self.adapt()
                 dune.fem.loadBalance([self.solution_p, self.solution_u, self.u_old, self.p_old])
@@ -252,15 +253,15 @@ def compute_quasi_stokes(rho, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
             velocity_inflow,
             outflow,
         ],
-        solver="gmres",
+        solver=("petsc", "gmres"),
         parameters=params,
     )
 
     solution = composite_space.function(name="solution_quasi_stokes")
     quasi_stokes_scheme.solve(target=solution)
     indices_split = vortex_solver.V_space.size
-    np.save("initial_velocity.npy", solution.as_petsc[:indices_split])
-    np.save("initial_pressure.npy", solution.as_petsc[indices_split:])
+    np.save("initial_velocity.npy", solution.as_numpy[:indices_split])
+    np.save("initial_pressure.npy", solution.as_numpy[indices_split:])
 
 
 order = 2
