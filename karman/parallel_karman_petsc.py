@@ -10,22 +10,17 @@ from dune.fem.space import lagrange
 from dune.grid import cartesianDomain
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+import numpy
+from scipy.sparse import linalg
 import sys
-# try:
-#     import petsc4py
-#     petsc4py.init(sys.argv)
-#     from petsc4py import PETSc
-# except ImportError:
-#     print("Example requires `petsc4py` - skipping")
-#     sys.exit(0)
+import os
+original_dir = os.getcwd()
+output_dir = os.path.join(original_dir, "karman/petsc_"+str(comm.size)+"p")
+os.makedirs(output_dir, exist_ok=True)
+os.chdir(output_dir)
+import functools
+print = functools.partial(print, flush = True) if comm.rank==0 else lambda *a, **kw: None
 
-# from dune.common.checkconfiguration import assertCMakeHave, ConfigurationError
-# try:
-#     assertCMakeHave("HAVE_PETSC")
-#     petsc = True
-# except ConfigurationError:
-#     print("Dune not configured with petsc - skipping example")
-#     petsc = False
 
 #help(aluCubeGrid)
 mu  = dune.ufl.Constant(1, "mu")
@@ -42,16 +37,24 @@ class NavierStokesSolver:
         self.dt = dt
         self.t = dune.ufl.Constant(0, name="time")
         # self.gridView.plot() if comm.rank == 0 else None
+        # self.gridView.hierarchicalGrid.loadBalance()  # cannot be feed forwarded, because then solution_u is computed on each of the domains -> wrong boundary values???
+        # fails without loadbalance
+        dune.fem.loadBalance(self.gridView.hierarchicalGrid)
         self.setup_space()
         self.max_refinement_level = max_refinement_level
-        self.gridView.hierarchicalGrid.loadBalance()
-        dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
+        # self.gridView.hierarchicalGrid.loadBalance()  # changes self.solution_u???
+        # dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
+        #print("before")
+        #print(numpy.nonzero(self.solution_u.as_numpy))
+        #dune.fem.loadBalance(self.gridView.hierarchicalGrid)
+        #print("after")
+        #print(numpy.nonzero(self.solution_u.as_numpy))
         self.curl = self.calc_curl()
         self.vtk = self.gridView.sequencedVTK(
             "karman", pointdata=[self.solution_u, self.solution_p, self.curl],
         )
         print(self.gridView.size(0))
-        self.vtk()
+        self.vtk()  # stores image
 
     def setup_space(self):
         self.V_space = lagrange(self.gridView, order=self.order, dimRange=self.gridView.dimension) #, storage='petsc'
@@ -65,30 +68,30 @@ class NavierStokesSolver:
         self.n_p = ufl.FacetNormal(self.P_space)
         self.p = ufl.TrialFunction(self.P_space)
         self.q = ufl.TestFunction(self.P_space)
-        self.solution_u = self.V_space.function(name="solution_u")
+        self.solution_u = self.V_space.function(name="solution_u")  # all zeros
         self.solution_p = self.P_space.function(name="solution_p")
         self.f = dune.ufl.Constant((0, 0), "f")
         self.u_old = self.V_space.function(name="u_old")
         self.p_old = self.P_space.function(name="p_old")
         self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
-
-        try:
-            self.u_old.as_numpy[:] = (
-                np.load("initial_velocity.npy") if comm.rank == 0 else None
-            )
-            #assign( #apy
-            self.p_old.as_numpy[:] = (
-                np.load("initial_pressure.npy") if comm.rank == 0 else None
-            )
-        except Exception as e:
-            print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
-            compute_quasi_stokes(self.rho, self, order=self.order) if comm.rank == 0 else None
-            self.u_old.as_numpy[:] = (
-                np.load("initial_velocity.npy") if comm.rank == 0 else None
-            )
-            self.p_old.as_numpy[:] = (
-                np.load("initial_pressure.npy") if comm.rank == 0 else None
-            )
+        self.u_old.as_numpy[:], self.p_old.as_numpy[:] = compute_quasi_stokes_uzawa(self.rho, self.mu, self)
+        # try:
+        #     self.u_old.as_numpy[:] = (
+        #         np.load("../initial_velocity.npy") if comm.rank == 0 else None
+        #     )
+        #     #assign( #apy
+        #     self.p_old.as_numpy[:] = (
+        #         np.load("../initial_pressure.npy") if comm.rank == 0 else None
+        #     )
+        # except Exception as e:
+        #     print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
+        #     compute_quasi_stokes(self.rho, self.mu, self, order=self.order) if comm.rank == 0 else None
+        #     self.u_old.as_numpy[:] = (
+        #         np.load("initial_velocity.npy") if comm.rank == 0 else None
+        #     )
+        #     self.p_old.as_numpy[:] = (
+        #         np.load("initial_pressure.npy") if comm.rank == 0 else None
+        #     )
         self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
         self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
         self.element_storage = fem.space.finiteVolume(self.gridView)
@@ -199,7 +202,7 @@ class NavierStokesSolver:
                 dune.fem.loadBalance([self.solution_p, self.solution_u, self.u_old, self.p_old])
 
 
-def compute_quasi_stokes(rho, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
+def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
     print("computing quasi-stokes")
     grid = vortex_solver.gridView
     space_u = lagrange(grid, order=order, dimRange=2)
@@ -262,6 +265,115 @@ def compute_quasi_stokes(rho, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
     indices_split = vortex_solver.V_space.size
     np.save("initial_velocity.npy", solution.as_numpy[:indices_split])
     np.save("initial_pressure.npy", solution.as_numpy[indices_split:])
+
+def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
+    grid = vortex_solver.gridView
+    dim = grid.dimension
+    spcU = lagrange(grid, dimRange=grid.dimension, order=order)
+    spcP = lagrange(grid, order=order-1)
+
+    u = ufl.TrialFunction(spcU)
+    v = ufl.TestFunction(spcU)
+    p = ufl.TrialFunction(spcP)
+    q = ufl.TestFunction(spcP)
+
+    x = ufl.SpatialCoordinate(spcU)
+    exact_u = ufl.as_vector( [x[1] * (1.-x[1]), 0] )
+    exact_p = (-2*x[0] + 2)*rho
+    f = ufl.as_vector( [0,]*dim)
+    f += mu*exact_u
+
+    epsilon = lambda w: 0.5 * (ufl.nabla_grad(w) + ufl.nabla_grad(w).T)
+    sigma = -p * ufl.Identity(2) + 2 * mu * epsilon(u)
+
+    # boundary conditions
+    no_slip_bottom = dune.ufl.DirichletBC(spcU, [0, 0], x[1] < 1e-10)
+    no_slip_top = dune.ufl.DirichletBC(spcU, [0, 0], x[1] > H - 1e-10)
+    no_slip_cylinder = dune.ufl.DirichletBC(
+        spcU,
+        [0, 0],
+        ufl.sqrt((x[0] - 0.2) ** 2 + (x[1] - 0.2) ** 2) < r + 1e-10,
+    )
+    velocity_inflow = dune.ufl.DirichletBC(
+        spcU,
+        [(6 * x[1] * (H - x[1])) / np.power(H, 2), 0],
+        x[0] < 1e-10,
+    )
+    outflow = dune.ufl.DirichletBC(
+        spcP, [0], x[0] > L - 1e-10
+    )
+    #dbc = dune.ufl.DirichletBC(spcU, exact_u)
+
+    A_model = rho * ufl.dot(u,v) * ufl.dx + mu * ufl.inner(ufl.grad(u) + ufl.grad(u).T, ufl.grad(v)) * ufl.dx - ufl.dot(f,v) * ufl.dx
+    grad_model = -ufl.inner(p*ufl.Identity(grid.dimension), ufl.grad(v)) * ufl.dx
+    B_model = - ufl.inner(q, ufl.div(u)) * ufl.dx
+    precondition_model = ufl.inner(ufl.grad(p), ufl.grad(q)) * ufl.dx
+    mass_model = p * q * ufl.dx
+
+    A_op = dune.fem.operator.galerkin([A_model, no_slip_bottom, no_slip_top, no_slip_cylinder, velocity_inflow])
+    grad_operator = dune.fem.operator.galerkin([grad_model, no_slip_bottom, no_slip_top, no_slip_cylinder, velocity_inflow])
+    B_op = dune.fem.operator.galerkin([B_model, outflow])
+    precondition_op = dune.fem.operator.galerkin((precondition_model, dune.ufl.DirichletBC(spcP, 0)),spcP)
+    mass_op = dune.fem.operator.galerkin(mass_model)
+
+    A = A_op.linear()
+    A = A.as_numpy
+    G = grad_operator.linear()
+    G = G.as_numpy
+    B = B_op.linear()
+    B = B.as_numpy
+    precondition = precondition_op.linear()
+    precondition = precondition.as_numpy
+    mass_op = mass_op.linear()
+    mass_op = mass_op.as_numpy
+
+    velocity = spcU.interpolate([0,0], name = "velocity")
+    pressure = spcP.interpolate(0, name = "pressure")
+    sol_u = velocity.as_numpy
+    sol_p = pressure.as_numpy
+    rhsVelo  = velocity.copy()
+    rhsPress = pressure.copy()
+    rhs_u  = rhsVelo.as_numpy
+    rhs_p  = rhsPress.as_numpy
+    r2      = np.zeros_like(rhs_p)
+    precon = np.zeros_like(rhs_p)
+    chi = np.zeros_like(rhs_u)
+
+    A_op(velocity, rhsVelo) # für randwerte
+    # rhsVelo.plot()
+    rhs_u *= -1
+    A_op.setConstraints(rhsVelo)
+    sol_u[:] = linalg.spsolve(A, rhs_u) #u = A^-1 * (F-B*p) // but p= 0 //  3.99a
+    rhs_p[:] = B * sol_u # 3.99b, rhs_p = B*u
+    r2 = linalg.spsolve(mass_op, rhs_p) # 3.99b, M * r = rhs_p
+    precon[:] = linalg.spsolve(precondition, rhs_p) # 3.99c, P * precon = rhs_p
+    r2[:]= mu*r2 + precon * rho # 3.99d r = mu * r + rho * precon
+    d = np.copy(r2) # 3.99e, d = r
+    delta = np.dot(r2,rhs_p) # 3.99f, delta = mass * r * mass^-1 *rhs_p
+
+    iterations = 0
+    
+    while delta > 1e-8 and iterations < 1000:
+        rhs_u[:] = G * d # 3.99g, rhs_u = G * d
+        chi[:] = linalg.spsolve(A, rhs_u) # 3.99g, chi = A^-1 * rhs_u
+        rhs_p[:] = B * chi # wie oben 3.99b
+        scale = - delta/np.dot(d, rhs_p) # 3.99h, rho = - delta / (d * B * chi)
+        sol_p -= scale * d # 3.99i, p = p - rho * d
+        sol_u += scale * chi # 3.99i, u = u + rho * chi
+        rhs_p[:] = B * sol_u # wie oben 3.99b
+        r2 = linalg.spsolve(mass_op, rhs_p) # 3.99k // wie oben 3.99b
+        precon[:] = linalg.spsolve(precondition, rhs_p) # 3.99k // wie oben 3.99c
+        r2[:] = mu*r2 + precon * rho # wie oben 3.99d
+        delta_new = np.dot(r2, rhs_p) # 3.99n, delta_new = r * M * r
+        gamma = delta_new / delta # 3.99o, gamma = delta_new / delta
+        delta = delta_new
+        d[:] = r2 + gamma * d # 3.99p, d = r + gamma * d
+        print(f"error at iteration {iterations}: {delta}")
+        iterations += 1
+    vtk = grid.sequencedVTK("initialization", pointdata=[velocity, pressure])
+    vtk()
+    print()
+    return sol_u, sol_p
 
 
 order = 2
