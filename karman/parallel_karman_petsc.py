@@ -29,20 +29,22 @@ dt = dune.ufl.Constant(0.02, "dt")
 
 
 class NavierStokesSolver:
-    def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5):
+    def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5, init_method="monolithic"):
         self.gridView = gridView
         self.order = order
         self.mu = mu
         self.rho = rho
         self.dt = dt
+        self.init_method = init_method
         self.t = dune.ufl.Constant(0, name="time")
         # self.gridView.plot() if comm.rank == 0 else None
         # self.gridView.hierarchicalGrid.loadBalance()  # cannot be feed forwarded, because then solution_u is computed on each of the domains -> wrong boundary values???
         # fails without loadbalance
-        dune.fem.loadBalance(self.gridView.hierarchicalGrid)
+        # does same as self.gridView.hierarchichalGrid.loadBalance?
+        # dune.fem.loadBalance(self.gridView.hierarchicalGrid)
         self.setup_space()
         self.max_refinement_level = max_refinement_level
-        # self.gridView.hierarchicalGrid.loadBalance()  # changes self.solution_u???
+        self.gridView.hierarchicalGrid.loadBalance()  # changes self.solution_u???
         # dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
         #print("before")
         #print(numpy.nonzero(self.solution_u.as_numpy))
@@ -74,27 +76,35 @@ class NavierStokesSolver:
         self.u_old = self.V_space.function(name="u_old")
         self.p_old = self.P_space.function(name="p_old")
         self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
-        self.u_old.as_numpy[:], self.p_old.as_numpy[:] = compute_quasi_stokes_uzawa(self.rho, self.mu, self)
-        # try:
-        #     self.u_old.as_numpy[:] = (
-        #         np.load("../initial_velocity.npy") if comm.rank == 0 else None
-        #     )
-        #     #assign( #apy
-        #     self.p_old.as_numpy[:] = (
-        #         np.load("../initial_pressure.npy") if comm.rank == 0 else None
-        #     )
-        # except Exception as e:
-        #     print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
-        #     compute_quasi_stokes(self.rho, self.mu, self, order=self.order) if comm.rank == 0 else None
-        #     self.u_old.as_numpy[:] = (
-        #         np.load("initial_velocity.npy") if comm.rank == 0 else None
-        #     )
-        #     self.p_old.as_numpy[:] = (
-        #         np.load("initial_pressure.npy") if comm.rank == 0 else None
-        #     )
-        self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
-        self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
-        self.element_storage = fem.space.finiteVolume(self.gridView)
+        if self.init_method == "uzawa":
+            self.u_old.as_numpy[:], self.p_old.as_numpy[:] = compute_quasi_stokes_uzawa(self.rho, self.mu, self)
+        elif self.init_method == "monolithic":
+            try:
+                self.u_old.as_numpy[:] = (
+                    np.load("../initial_velocity.npy") if comm.rank == 0 else None
+                )
+                #assign( #apy
+                self.p_old.as_numpy[:] = (
+                    np.load("../initial_pressure.npy") if comm.rank == 0 else None
+                )
+            except Exception as e:
+                print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
+                compute_quasi_stokes(self.rho, self.mu, self, order=self.order) if comm.rank == 0 else None
+                self.u_old.as_numpy[:] = (
+                    np.load("initial_velocity.npy") if comm.rank == 0 else None
+                )
+                self.p_old.as_numpy[:] = (
+                    np.load("initial_pressure.npy") if comm.rank == 0 else None
+                )
+            self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
+            self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
+            vtk = self.gridView.sequencedVTK("initialization", pointdata=[self.solution_u, self.solution_p])
+            vtk()
+            self.element_storage = fem.space.finiteVolume(self.gridView)
+        elif self.init_method == "none" or self.init_method == "increase":
+            pass
+        else:
+            raise Exception("Chosen initialization method does not exist.")
 
     def adapt(self):
         curl = self.calc_curl()
@@ -195,6 +205,8 @@ class NavierStokesSolver:
             progress_bar.update(self.dt.value) if comm.rank == 0 else None
             
             if time_between_plots is not None and self.t.value >= next_plot_time:
+                #print()
+                #print(self.t.value/increasingInflowDuration)
                 next_plot_time += time_between_plots
                 self.curl.as_numpy[:] = self.calc_curl().as_numpy[:]
                 self.vtk()
@@ -263,9 +275,38 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     solution = composite_space.function(name="solution_quasi_stokes")
     quasi_stokes_scheme.solve(target=solution)
     indices_split = vortex_solver.V_space.size
-    np.save("initial_velocity.npy", solution.as_numpy[:indices_split])
-    np.save("initial_pressure.npy", solution.as_numpy[indices_split:])
+    np.save("initial_velocity_4p.npy", solution.as_numpy[:indices_split])
+    np.save("initial_pressure_4p.npy", solution.as_numpy[indices_split:])
 
+class Scheme1:
+    def __init__(self, scheme, u0):
+        self.scheme = scheme
+        self.jacobian = scheme.linear(ubar=u0) # obtain a linear operator for the Newton method
+
+    def solve(self, target):
+        # create a copy of target for the residual
+        res = target.copy(name="residual")
+        dh  = target.copy(name="direction")
+        n, linIter = 0,0
+        while True:
+            # res = S[u]
+            #     = u - g on boundary
+            self.scheme(target, res)
+            absF = res.scalarProductDofs(res)
+            if absF < 1e-7**2: # this is the same tolerance we set above for the built-in Newton solver
+                break
+            self.scheme.jacobian(target,self.jacobian)  # assemble the linearization
+            # dh = DS[u]^{-1}S[u]
+            #    = u - g on boundary
+            dh.clear()
+            info = self.jacobian.solve(target=dh,rightHandSide=res)
+            linIter += info["linear_iterations"]
+            # unew = u - DS[u]^{-1}S[u]
+            #      = u - (u-g) = g on boundary
+            target -= dh
+            n += 1
+        return {"iterations":n, "linear_iterations":linIter}
+    
 def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
     grid = vortex_solver.gridView
     dim = grid.dimension
@@ -279,7 +320,6 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
 
     x = ufl.SpatialCoordinate(spcU)
     exact_u = ufl.as_vector( [x[1] * (1.-x[1]), 0] )
-    exact_p = (-2*x[0] + 2)*rho
     f = ufl.as_vector( [0,]*dim)
     f += mu*exact_u
 
@@ -344,6 +384,18 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
     rhs_u *= -1
     A_op.setConstraints(rhsVelo)
     sol_u[:] = linalg.spsolve(A, rhs_u) #u = A^-1 * (F-B*p) // but p= 0 //  3.99a
+    
+    # trial for parallelization
+    # scheme = dune.fem.scheme.galerkin(A == rhs_u, solver='cg',  # sind A_model und rhsVelo falsch gewählt? Alle anderen Möglichkeiten auch error
+    #               parameters={"linear.preconditioning.method":"jacobi",
+    #                           "nonlinear.forcing":"eisenstatwalker",
+    #                           # this is the default for this forcing
+    #                           "linear.errormeasure":"residualreduction",
+    #                           "nonlinear.tolerance":1e-7},
+    #              )
+    # scheme_cls = Scheme1(scheme,u0=velocity)
+    # info = scheme_cls.solve(target=velocity)
+
     rhs_p[:] = B * sol_u # 3.99b, rhs_p = B*u
     r2 = linalg.spsolve(mass_op, rhs_p) # 3.99b, M * r = rhs_p
     precon[:] = linalg.spsolve(precondition, rhs_p) # 3.99c, P * precon = rhs_p
@@ -391,7 +443,8 @@ with pygmsh.occ.Geometry() as geom:
         "vertices": points[:, :2].astype(float),
         "simplices": cells["triangle"].astype(int),
     }
-lb_method = 9
+lb_method = 13
+# help(leafGridView)
 vortex_street_grid = (
     leafGridView(domain, dimgrid=2, lbMethod=lb_method)
     if comm.rank == 0
@@ -428,11 +481,19 @@ neumann_boundary_form_right = (
     * ufl.ds
     - ufl.dot(vortex_solver.p_old * vortex_solver.n_p, vortex_solver.v) * ufl.ds
 )
-velocity_inflow_boundary = dune.ufl.DirichletBC(
-    vortex_solver.V_space,
-    [(6 * vortex_solver.x_u[1] * (H - vortex_solver.x_u[1])) / np.pow(H, 2), 0],
-    vortex_solver.x_u[0] < 1e-10,
-)
+if vortex_solver.init_method=="increase":
+    increasingInflowDuration = 0.1
+    velocity_inflow_boundary = dune.ufl.DirichletBC(
+        vortex_solver.V_space,
+        [(6 * vortex_solver.x_u[1] * (H - vortex_solver.x_u[1])) / np.pow(H, 2) * ufl.min_value(1.0, vortex_solver.t/increasingInflowDuration), 0],
+        vortex_solver.x_u[0] < 1e-10,
+    )
+else:
+    velocity_inflow_boundary = dune.ufl.DirichletBC(
+        vortex_solver.V_space,
+        [(6 * vortex_solver.x_u[1] * (H - vortex_solver.x_u[1])) / np.pow(H, 2), 0],
+        vortex_solver.x_u[0] < 1e-10,
+    )
 
 print("init schemes")
 vortex_solver.generate_navier_stokes_schemes(
