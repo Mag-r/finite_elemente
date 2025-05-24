@@ -1,3 +1,4 @@
+from dune.alugrid import aluCubeGrid
 import dune
 import numpy as np
 import pygmsh
@@ -10,7 +11,8 @@ from dune.grid import cartesianDomain
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-mu = dune.ufl.Constant(1, "mu")
+#help(aluCubeGrid)
+mu  = dune.ufl.Constant(1, "mu")
 rho = dune.ufl.Constant(1, "rho")
 dt = dune.ufl.Constant(0.02, "dt")
 
@@ -141,7 +143,7 @@ class NavierStokesSolver:
             "nonlinear.verbose": False,
             "linear.verbose": False,
             # "linear.tolerance": 1e-6,
-            # "linear.preconditioning": "gauss-seidel",
+            "linear.preconditioning.method": "gauss-seidel",
         }
         self.step_one_scheme = fem.scheme.galerkin(
             [step_one_form == 0, *velocity_boundary_condition],

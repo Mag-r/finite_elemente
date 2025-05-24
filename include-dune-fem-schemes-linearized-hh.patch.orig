@@ -1,0 +1,20 @@
+--- ./include/dune/fem/schemes/linearized.hh.orig	2025-03-24 07:54:25.993274982 +0100
++++ ./include/dune/fem/schemes/linearized.hh	2025-03-24 13:34:22.044767451 +0100
+@@ -85,7 +85,7 @@
+       //! \todo @docme
+       LinearScheme ( SchemeType &scheme,
+                      Dune::Fem::ParameterReader parameter = Dune::Fem::Parameter::container() )
+-        : BaseType( "linearized Op", scheme.space(), scheme.space() ),
++        : BaseType( "linearized Op", scheme.space(), scheme.space(), parameter ),
+           FSBaseType( scheme, parameter ),
+           isBound_(false),
+           parameter_( std::move( parameter ) ),
+@@ -96,7 +96,7 @@
+       //! \todo @docme
+       LinearScheme ( SchemeType &scheme, const DiscreteFunctionType &ubar,
+                      Dune::Fem::ParameterReader parameter = Dune::Fem::Parameter::container() )
+-        : BaseType( "linearized Op", scheme.space(), scheme.space() ),
++        : BaseType( "linearized Op", scheme.space(), scheme.space(), parameter ),
+           FSBaseType( scheme, parameter ),
+           isBound_(false),
+           parameter_( std::move( parameter ) ),
