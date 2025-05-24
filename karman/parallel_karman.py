@@ -10,6 +10,7 @@ from dune.fem.space import lagrange
 from dune.grid import cartesianDomain
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+from time import time
 
 #help(aluCubeGrid)
 mu  = dune.ufl.Constant(1, "mu")
@@ -18,7 +19,7 @@ dt = dune.ufl.Constant(0.02, "dt")
 
 
 class NavierStokesSolver:
-    def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5):
+    def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5, load_data=False):
         self.gridView = gridView
         self.order = order
         self.mu = mu
@@ -26,18 +27,18 @@ class NavierStokesSolver:
         self.dt = dt
         self.t = dune.ufl.Constant(0, name="time")
         # self.gridView.plot() if comm.rank == 0 else None
-        self.setup_space()
+        self.setup_space(load_data=load_data)
         self.max_refinement_level = max_refinement_level
         self.gridView.hierarchicalGrid.loadBalance()
         dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
         self.curl = self.calc_curl()
-        self.vtk = self.gridView.sequencedVTK(
-            "karman", pointdata=[self.solution_u, self.solution_p, self.curl],
-        )
+        # self.vtk = self.gridView.sequencedVTK(
+        #     "karman", pointdata=[self.solution_u, self.solution_p, self.curl],
+        # )
         print(self.gridView.size(0))
-        self.vtk()
+        # self.vtk()
 
-    def setup_space(self):
+    def setup_space(self, load_data=False):
         self.V_space = lagrange(
             self.gridView, order=self.order, dimRange=self.gridView.dimension
         )
@@ -57,26 +58,26 @@ class NavierStokesSolver:
         self.u_old = self.V_space.function(name="u_old")
         self.p_old = self.P_space.function(name="p_old")
         self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
-
-        try:
-            self.u_old.as_numpy[:] = (
-                np.load("initial_velocity.npy") if comm.rank == 0 else None
-            )
-            self.p_old.as_numpy[:] = (
-                np.load("initial_pressure.npy") if comm.rank == 0 else None
-            )
-        except Exception as e:
-            print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
-            compute_quasi_stokes(self.rho, self, order=self.order) if comm.rank == 0 else None
-            self.u_old.as_numpy[:] = (
-                np.load("initial_velocity.npy") if comm.rank == 0 else None
-            )
-            self.p_old.as_numpy[:] = (
-                np.load("initial_pressure.npy") if comm.rank == 0 else None
-            )
-        self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
-        self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
         self.element_storage = fem.space.finiteVolume(self.gridView)
+        if load_data:
+            try:
+                self.u_old.as_numpy[:] = (
+                    np.load("initial_velocity.npy") if comm.rank == 0 else None
+                )
+                self.p_old.as_numpy[:] = (
+                    np.load("initial_pressure.npy") if comm.rank == 0 else None
+                )
+            except Exception as e:
+                print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
+                compute_quasi_stokes(self.rho, self, order=self.order) if comm.rank == 0 else None
+                self.u_old.as_numpy[:] = (
+                    np.load("initial_velocity.npy") if comm.rank == 0 else None
+                )
+                self.p_old.as_numpy[:] = (
+                    np.load("initial_pressure.npy") if comm.rank == 0 else None
+                )
+            self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
+            self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
 
     def adapt(self):
         curl = self.calc_curl()
@@ -143,21 +144,21 @@ class NavierStokesSolver:
             "nonlinear.verbose": False,
             "linear.verbose": False,
             # "linear.tolerance": 1e-6,
-            "linear.preconditioning.method": "gauss-seidel",
+            "linear.preconditioning.method": "hypre",
         }
         self.step_one_scheme = fem.scheme.galerkin(
             [step_one_form == 0, *velocity_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
         self.step_two_scheme = fem.scheme.galerkin(
             [step_two_form == 0, *pressure_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
         self.step_three_scheme = fem.scheme.galerkin(
             [step_three_form == 0, *velocity_boundary_condition],
-            solver="gmres",
+            solver=("petsc","gmres"),
             parameters=params,
         )
 
@@ -179,8 +180,8 @@ class NavierStokesSolver:
             if time_between_plots is not None and self.t.value >= next_plot_time:
                 next_plot_time += time_between_plots
                 self.curl.as_numpy[:] = self.calc_curl().as_numpy[:]
-                self.vtk()
-                self.adapt()
+                # self.vtk()
+                # self.adapt()
                 dune.fem.loadBalance([self.solution_p, self.solution_u, self.u_old, self.p_old])
 
 
@@ -264,7 +265,7 @@ with pygmsh.occ.Geometry() as geom:
         "vertices": points[:, :2].astype(float),
         "simplices": cells["triangle"].astype(int),
     }
-lb_method = 9
+lb_method = 13
 vortex_street_grid = (
     leafGridView(domain, dimgrid=2, lbMethod=lb_method)
     if comm.rank == 0
@@ -301,9 +302,10 @@ neumann_boundary_form_right = (
     * ufl.ds
     - ufl.dot(vortex_solver.p_old * vortex_solver.n_p, vortex_solver.v) * ufl.ds
 )
+increasingInflowDuration = 0.1
 velocity_inflow_boundary = dune.ufl.DirichletBC(
     vortex_solver.V_space,
-    [(6 * vortex_solver.x_u[1] * (H - vortex_solver.x_u[1])) / np.pow(H, 2), 0],
+    [(6 * vortex_solver.x_u[1] * (H - vortex_solver.x_u[1])) / np.pow(H, 2) * ufl.min_value(1.0, vortex_solver.t/increasingInflowDuration), 0],
     vortex_solver.x_u[0] < 1e-10,
 )
 
@@ -314,4 +316,7 @@ vortex_solver.generate_navier_stokes_schemes(
     neumann_boundary_form_right,
 )
 print("integrating")
-vortex_solver.integrate(t_end, time_between_plots=0.01)
+start = time()
+vortex_solver.integrate(t_end)
+end = time()
+print(f"Integration took {end - start} seconds, with {comm.size} processes")

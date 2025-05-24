@@ -2,7 +2,8 @@
 /fem_tutorial
 /zoltan
 /ZoltanDist
-*.sh
+bootstrap.sh
+build-zoltan.sh
 *.log
 *.vtu
 *.pvtu
