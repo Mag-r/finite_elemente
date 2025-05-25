@@ -18,8 +18,10 @@ import numpy
 from scipy.sparse import linalg
 import sys
 import os
+from gmsh2dgf import gmsh2DGF
+from dune.grid import reader as gridReader
 original_dir = os.getcwd()
-output_dir = os.path.join(original_dir, "karman/petsc_"+str(comm.size)+"p")
+output_dir = os.path.join(original_dir, "karman/petsc_"+str(comm.size)+"p_precond")
 os.makedirs(output_dir, exist_ok=True)
 os.chdir(output_dir)
 import functools
@@ -67,7 +69,9 @@ class NavierStokesSolver:
         self.solution_p = self.P_space.function(name="solution_p")
         self.f = dune.ufl.Constant((0, 0), "f")
         self.u_old = self.V_space.function(name="u_old")
+        shape_u = self.u_old.as_numpy[:].shape[0]
         self.p_old = self.P_space.function(name="p_old")
+        shape_p = self.p_old.as_numpy[:].shape[0]
         self.element_storage = fem.space.finiteVolume(self.gridView,dimRange=1)
         if self.init_method == "monolithic":
             try:
@@ -79,13 +83,13 @@ class NavierStokesSolver:
                     np.load("../initial_pressure_refine8.npy") if comm.rank == 0 else None
                 )
             except Exception as e:
-                print(f"No initial condition found, computing quasi-stokes, wih error: {e}")
+                print(f"No initial condition found, computing quasi-stokes, with error: {e}")
                 compute_quasi_stokes(self.rho, self.mu, self, order=self.order) if comm.rank == 0 else None
                 self.u_old.as_numpy[:] = (
-                    np.load("initial_velocity.npy") if comm.rank == 0 else None
+                    np.load("../initial_velocity"+str(shape_u)+".npy") if comm.rank == 0 else None
                 )
                 self.p_old.as_numpy[:] = (
-                    np.load("initial_pressure.npy") if comm.rank == 0 else None
+                    np.load("../initial_pressure"+str(shape_p)+".npy") if comm.rank == 0 else None
                 )
             self.solution_u.as_numpy[:] = self.u_old.as_numpy[:]
             self.solution_p.as_numpy[:] = self.p_old.as_numpy[:]
@@ -173,7 +177,7 @@ class NavierStokesSolver:
 
     def perform_one_step(self):
         start_time_step_one = time.time()
-        self.step_one_scheme.solve(target=self.solution_u)
+        info_step_one = self.step_one_scheme.solve(target=self.solution_u)
         end_time_step_one = time.time()
         print()
         print(end_time_step_one-start_time_step_one)
@@ -251,8 +255,8 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     solution = composite_space.function(name="solution_quasi_stokes")
     quasi_stokes_scheme.solve(target=solution)
     indices_split = vortex_solver.V_space.size
-    np.save("initial_velocity_4p.npy", solution.as_numpy[:indices_split])
-    np.save("initial_pressure_4p.npy", solution.as_numpy[indices_split:])
+    np.save("initial_velocity"+str(vortex_solver.u_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[:indices_split])
+    np.save("initial_pressure"+str(vortex_solver.p_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[indices_split:])
 
 order = 2
 t_end = 10
@@ -269,6 +273,47 @@ with pygmsh.occ.Geometry() as geom:
         "vertices": points[:, :2].astype(float),
         "simplices": cells["triangle"].astype(int),
     }
+
+# with pygmsh.geo.Geometry() as geom:
+#     # Domain size
+#     L, H = 2.2, 0.41
+#     r = 0.05
+#     eps=1e-10
+#     geom.set_mesh_size_callback(lambda dim, tag, x, y, z, lc:
+#         min(r + 1.5*( (x-0.2)**2+(y-0.2)**2), H / 2.0)
+#     )
+#     obstacle = geom.add_circle([0.2, 0.2, 0.0], r, make_surface=False)
+#     domain = geom.add_rectangle(0, L, 0, H, 0, holes=[obstacle.curve_loop])
+#     geom.add_physical(domain, 'domain')
+#     geom.add_physical(obstacle.curve_loop.curves, 'obstacle')
+#     mesh = geom.generate_mesh(dim=2)
+#     points, cells = mesh.points, mesh.cells_dict
+#     boundaryDomains = {
+#         1: [[0.0-eps, 0.0-eps], [0.0+eps, H+eps]], # bbox inflow
+#         2: [[L-eps, 0.0-eps], [L+eps, H+eps]], # bbox outflow
+#         3: [[0.2-r-eps, 0.2-r-eps], [0.2+r+eps, 0.2+r+eps]], # bbox hole
+#         4: "default", # top and bottom
+#     }
+#     dgf = gmsh2DGF(points, cells, bndDomain=boundaryDomains, dim=2)
+#     obstacleFacets = mesh.cells[0].data[mesh.cell_sets['obstacle'][0]]
+#     dgf += f'''
+# Projection
+# function d(x) = x - {[0.2, 0.2]}
+# function p(x) = {r} * d(x) / |d(x)| + {[0.2, 0.2]}
+# '''
+#     for facet in obstacleFacets:
+#         dgf += f'''segment {facet[0]} {facet[1]} p
+# '''
+#     dgf += '''
+# #
+#     GridParameter
+# Name ChannelWithHole
+# RefinementEdge longest
+# bisectioncompatibility 1
+# #
+# '''
+# domain = (gridReader.dgfString, dgf)
+
 lb_method = 13
 # help(leafGridView)
 vortex_street_grid = (
@@ -279,8 +324,8 @@ vortex_street_grid = (
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
 vortex_street_grid.hierarchicalGrid.globalRefine(8)
 mu.value = 1e-3
-#dt.value = 5e-5
-dt.value = t_end
+dt.value = 5e-5
+t_end = dt.value
 vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt, max_refinement_level=6)
 no_slip_bottom = dune.ufl.DirichletBC(
     vortex_solver.V_space, [0, 0], vortex_solver.x_u[1] < 1e-10
