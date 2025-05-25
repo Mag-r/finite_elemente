@@ -33,7 +33,6 @@ mu  = dune.ufl.Constant(1, "mu")
 rho = dune.ufl.Constant(1, "rho")
 dt = dune.ufl.Constant(0.02, "dt")
 
-
 class NavierStokesSolver:
     def __init__(self, gridView, order, mu, rho, dt, max_refinement_level=5, init_method="monolithic"):
         self.gridView = gridView
@@ -76,11 +75,11 @@ class NavierStokesSolver:
         if self.init_method == "monolithic":
             try:
                 self.u_old.as_numpy[:] = (
-                    np.load("../initial_velocity_refine8.npy") if comm.rank == 0 else None
+                    np.load("../initial_velocity"+str(shape_u)+".npy") if comm.rank == 0 else None
                 )
                 #assign( #apy
                 self.p_old.as_numpy[:] = (
-                    np.load("../initial_pressure_refine8.npy") if comm.rank == 0 else None
+                    np.load("../initial_pressure"+str(shape_p)+".npy") if comm.rank == 0 else None
                 )
             except Exception as e:
                 print(f"No initial condition found, computing quasi-stokes, with error: {e}")
@@ -148,44 +147,60 @@ class NavierStokesSolver:
             * ufl.dot(ufl.nabla_grad(self.solution_p - self.p_old), self.v)
             * ufl.dx
         )
-        params = {
+        precon = "none"
+        params_verbose = {
             "nonlinear.verbose": True,
             "linear.verbose": True,
             #"linear.tolerance": 1e-6,
             "linear.preconditioning.relaxation": 1.5,
-            "linear.preconditioning.method": "ilu",
+            "linear.maxiterations": 1000,
+            "linear.preconditioning.method": precon,
             "linear.petsc.blockedmode": False,
             "linear.errormeasure": "absolute",
-            #"logging": "log-ssor", #braucht es gar nicht, linear.verbose: True ist ausreichen
+            #"logging": "log-ilu", #braucht es gar nicht, linear.verbose: True ist ausreichen. Scheint auch nicht zu helfen residuals zu speichern
+        }
+        params_no_verbose = {
+            "nonlinear.verbose": False,
+            "linear.verbose": False,
+            #"linear.tolerance": 1e-6,
+            "linear.preconditioning.relaxation": 1.5,
+            #"linear.maxiterations": 50000,
+            "linear.preconditioning.method": precon,
+            "linear.petsc.blockedmode": False,
+            "linear.errormeasure": "absolute",
+            #"logging": "log-ilu", #braucht es gar nicht, linear.verbose: True ist ausreichen. Scheint auch nicht zu helfen residuals zu speichern
         }
         self.step_one_scheme = fem.scheme.galerkin(
             [step_one_form == 0, *velocity_boundary_condition],
             solver=("petsc","gmres"),
-            parameters=params,
+            parameters=params_no_verbose,
         )
         
         self.step_two_scheme = fem.scheme.galerkin(
             [step_two_form == 0, *pressure_boundary_condition],
             solver=("petsc","gmres"),
-            parameters=params,
+            parameters=params_no_verbose,
         )
         self.step_three_scheme = fem.scheme.galerkin(
             [step_three_form == 0, *velocity_boundary_condition],
             solver=("petsc","gmres"),
-            parameters=params,
+            parameters=params_verbose,
         )
 
     def perform_one_step(self):
-        start_time_step_one = time.time()
-        info_step_one = self.step_one_scheme.solve(target=self.solution_u)
-        end_time_step_one = time.time()
-        print()
-        print(end_time_step_one-start_time_step_one)
+        #start_time_step_one = time.time()
+        self.step_one_scheme.solve(target=self.solution_u)
+        #end_time_step_one = time.time()
+        #print()
+        #print(end_time_step_one-start_time_step_one)
         # self.vtk()
-        #self.step_two_scheme.solve(target=self.solution_p)
-        #self.step_three_scheme.solve(target=self.solution_u)
-        #self.p_old.as_numpy[:] = self.solution_p.as_numpy[:]
-        #self.u_old.as_numpy[:] = self.solution_u.as_numpy[:]
+        start_time_step_two = time.time()
+        self.step_two_scheme.solve(target=self.solution_p)
+        end_time_step_two = time.time()
+        print(end_time_step_two-start_time_step_two)
+        self.step_three_scheme.solve(target=self.solution_u)
+        self.p_old.as_numpy[:] = self.solution_p.as_numpy[:]
+        self.u_old.as_numpy[:] = self.solution_u.as_numpy[:]
 
     def integrate(self, endTime, time_between_plots=None):
         progress_bar = tqdm(total=endTime, desc="Integration Progress")
@@ -255,64 +270,64 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     solution = composite_space.function(name="solution_quasi_stokes")
     quasi_stokes_scheme.solve(target=solution)
     indices_split = vortex_solver.V_space.size
-    np.save("initial_velocity"+str(vortex_solver.u_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[:indices_split])
-    np.save("initial_pressure"+str(vortex_solver.p_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[indices_split:])
+    np.save("../initial_velocity"+str(vortex_solver.u_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[:indices_split])
+    np.save("../initial_pressure"+str(vortex_solver.p_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[indices_split:])
 
 order = 2
-t_end = 10
-with pygmsh.occ.Geometry() as geom:
-    # Domain size
-    L, H = 2.2, 0.41
-    r = 0.05
-    rectangle = geom.add_rectangle([0.0, 0.0, 0.0], L, H)
-    cylinder = geom.add_disk([0.2, 0.2, 0.0], r)
-    domain = geom.boolean_difference([rectangle], [cylinder])
-    mesh = geom.generate_mesh()
-    points, cells = mesh.points, mesh.cells_dict
-    domain = {
-        "vertices": points[:, :2].astype(float),
-        "simplices": cells["triangle"].astype(int),
-    }
-
-# with pygmsh.geo.Geometry() as geom:
+# wrong hole
+# with pygmsh.occ.Geometry() as geom:
 #     # Domain size
 #     L, H = 2.2, 0.41
 #     r = 0.05
-#     eps=1e-10
-#     geom.set_mesh_size_callback(lambda dim, tag, x, y, z, lc:
-#         min(r + 1.5*( (x-0.2)**2+(y-0.2)**2), H / 2.0)
-#     )
-#     obstacle = geom.add_circle([0.2, 0.2, 0.0], r, make_surface=False)
-#     domain = geom.add_rectangle(0, L, 0, H, 0, holes=[obstacle.curve_loop])
-#     geom.add_physical(domain, 'domain')
-#     geom.add_physical(obstacle.curve_loop.curves, 'obstacle')
-#     mesh = geom.generate_mesh(dim=2)
+#     rectangle = geom.add_rectangle([0.0, 0.0, 0.0], L, H)
+#     cylinder = geom.add_disk([0.2, 0.2, 0.0], r)
+#     domain = geom.boolean_difference([rectangle], [cylinder])
+#     mesh = geom.generate_mesh()
 #     points, cells = mesh.points, mesh.cells_dict
-#     boundaryDomains = {
-#         1: [[0.0-eps, 0.0-eps], [0.0+eps, H+eps]], # bbox inflow
-#         2: [[L-eps, 0.0-eps], [L+eps, H+eps]], # bbox outflow
-#         3: [[0.2-r-eps, 0.2-r-eps], [0.2+r+eps, 0.2+r+eps]], # bbox hole
-#         4: "default", # top and bottom
+#     domain = {
+#         "vertices": points[:, :2].astype(float),
+#         "simplices": cells["triangle"].astype(int),
 #     }
-#     dgf = gmsh2DGF(points, cells, bndDomain=boundaryDomains, dim=2)
-#     obstacleFacets = mesh.cells[0].data[mesh.cell_sets['obstacle'][0]]
-#     dgf += f'''
-# Projection
-# function d(x) = x - {[0.2, 0.2]}
-# function p(x) = {r} * d(x) / |d(x)| + {[0.2, 0.2]}
-# '''
-#     for facet in obstacleFacets:
-#         dgf += f'''segment {facet[0]} {facet[1]} p
-# '''
-#     dgf += '''
-# #
-#     GridParameter
-# Name ChannelWithHole
-# RefinementEdge longest
-# bisectioncompatibility 1
-# #
-# '''
-# domain = (gridReader.dgfString, dgf)
+
+with pygmsh.geo.Geometry() as geom:
+    # Domain size
+    L, H = 2.2, 0.41
+    r = 0.05
+    eps=1e-10
+    geom.set_mesh_size_callback(lambda dim, tag, x, y, z, lc:
+        min(r + 1.5*( (x-0.2)**2+(y-0.2)**2), H / 2.0)
+    )
+    obstacle = geom.add_circle([0.2, 0.2, 0.0], r, make_surface=False)
+    domain = geom.add_rectangle(0, L, 0, H, 0, holes=[obstacle.curve_loop])
+    geom.add_physical(domain, 'domain')
+    geom.add_physical(obstacle.curve_loop.curves, 'obstacle')
+    mesh = geom.generate_mesh(dim=2)
+    points, cells = mesh.points, mesh.cells_dict
+    boundaryDomains = {
+        1: [[0.0-eps, 0.0-eps], [0.0+eps, H+eps]], # bbox inflow
+        2: [[L-eps, 0.0-eps], [L+eps, H+eps]], # bbox outflow
+        3: [[0.2-r-eps, 0.2-r-eps], [0.2+r+eps, 0.2+r+eps]], # bbox hole
+        4: "default", # top and bottom
+    }
+    dgf = gmsh2DGF(points, cells, bndDomain=boundaryDomains, dim=2)
+    obstacleFacets = mesh.cells[0].data[mesh.cell_sets['obstacle'][0]]
+    dgf += f'''
+Projection
+function d(x) = x - {[0.2, 0.2]}
+function p(x) = {r} * d(x) / |d(x)| + {[0.2, 0.2]}
+'''
+    for facet in obstacleFacets:
+        dgf += f'''segment {facet[0]} {facet[1]} p
+'''
+    dgf += '''
+#
+    GridParameter
+Name ChannelWithHole
+RefinementEdge longest
+bisectioncompatibility 1
+#
+'''
+domain = (gridReader.dgfString, dgf)
 
 lb_method = 13
 # help(leafGridView)
@@ -322,10 +337,10 @@ vortex_street_grid = (
     else leafGridView({"vertices": [], "cubes": []}, dimgrid=2, lbMethod=lb_method)
 )
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
-vortex_street_grid.hierarchicalGrid.globalRefine(8)
+vortex_street_grid.hierarchicalGrid.globalRefine(4)
 mu.value = 1e-3
 dt.value = 5e-5
-t_end = dt.value
+t_end = 5e-5
 vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt, max_refinement_level=6)
 no_slip_bottom = dune.ufl.DirichletBC(
     vortex_solver.V_space, [0, 0], vortex_solver.x_u[1] < 1e-10
