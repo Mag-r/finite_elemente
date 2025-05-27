@@ -39,32 +39,11 @@ class NavierStokesSolver:
         self.dt = dt
         self.init_method = init_method
         self.t = dune.ufl.Constant(0, name="time")
-        # self.gridView.plot() if comm.rank == 0 else None
-
-        # self.gridView.hierarchicalGrid.loadBalance()  # cannot be feed forwarded, because then solution_u is computed on each of the domains -> wrong boundary values???
-        # fails without loadbalance
-        # does same as self.gridView.hierarchichalGrid.loadBalance?
-        # dune.fem.loadBalance(self.gridView.hierarchicalGrid)
         self.setup_space()
-        # u_values_copy = self.solution_u.as_numpy.copy() #gibt warnung? aber gleiches ergebnis wie solution_u_copy.as_numpy.copy()
         self.max_refinement_level = max_refinement_level
-        print("before")
-        print(numpy.nonzero(self.solution_u.as_numpy))
         if comm.size>1:
-            self.gridView.hierarchicalGrid.loadBalance()  # changes self.solution_u???
-        #print("after")
-        #print(numpy.nonzero(self.solution_u.as_numpy))
-        #print(numpy.nonzero(u_values_copy))
-        #self.solution_u.interpolate(u_values_copy)
-        #print("after reset")
-        #print(numpy.nonzero(self.solution_u.as_numpy))
-
+            self.gridView.hierarchicalGrid.loadBalance()  # sets self.u_solution to zero function
         dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
-        #print("before")
-        #print(numpy.nonzero(self.solution_u.as_numpy))
-        #dune.fem.loadBalance(self.gridView.hierarchicalGrid)
-        print("after")
-        print(numpy.nonzero(self.solution_u.as_numpy))
         self.curl = self.calc_curl()
         self.vtk = self.gridView.sequencedVTK(
             "karman", pointdata=[self.solution_u, self.solution_p, self.curl],
@@ -99,7 +78,6 @@ class NavierStokesSolver:
                 self.u_old.as_numpy[:] = (
                     np.load("../initial_velocity"+str(shape_u)+".npy") if comm.rank == 0 else None
                 )
-                #assign( #apy
                 self.p_old.as_numpy[:] = (
                     np.load("../initial_pressure"+str(shape_p)+".npy") if comm.rank == 0 else None
                 )
@@ -141,15 +119,14 @@ class NavierStokesSolver:
 
     def calc_curl(self):
         curl = ufl.curl(ufl.as_vector([self.solution_u[0], self.solution_u[1]]))
-        #curl = ufl.sqrt(ufl.inner(curl, curl))
         curl = ufl.sqrt(fem.integrate(ufl.dot(curl, curl), self.gridView, order=2))
         curl = self.element_storage.interpolate(curl, name="curl")
 
         min_curl = comm.min(np.min(np.abs(curl.as_numpy)))
         max_curl = comm.max(np.max(np.abs(curl.as_numpy)))
         if max_curl > min_curl:
-            curl.as_numpy[:] -= min_curl
-            curl.as_numpy[:] /= max_curl - min_curl
+           curl.as_numpy[:] -= min_curl
+           curl.as_numpy[:] /= max_curl - min_curl
         print(f"max curl: {max_curl}, min curl: {min_curl}")
         return curl
 
@@ -212,7 +189,6 @@ class NavierStokesSolver:
 
     def perform_one_step(self):
         self.step_one_scheme.solve(target=self.solution_u)
-        #self.vtk()
         self.step_two_scheme.solve(target=self.solution_p)
         self.step_three_scheme.solve(target=self.solution_u)
         self.p_old.as_numpy[:] = self.solution_p.as_numpy[:]
@@ -227,8 +203,6 @@ class NavierStokesSolver:
             progress_bar.update(self.dt.value) if comm.rank == 0 else None
             
             if time_between_plots is not None and self.t.value >= next_plot_time:
-                #print()
-                #print(self.t.value/increasingInflowDuration)
                 next_plot_time += time_between_plots
                 self.curl.as_numpy[:] = self.calc_curl().as_numpy[:]
                 self.vtk()
@@ -277,7 +251,7 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     )
     outflow = dune.ufl.DirichletBC(
         composite_space, [None, None, 0], x[0] > L - 1e-10
-    )  # outflow condition
+    )
 
     params = {"nonlinear.verbose": False, "linear.verbose": False}
 
@@ -300,6 +274,7 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     np.save("../initial_velocity"+str(vortex_solver.u_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[:indices_split])
     np.save("../initial_pressure"+str(vortex_solver.p_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[indices_split:])
 
+# trial for parallelization of uzawa, not used
 class Scheme1:
     def __init__(self, scheme, u0):
         self.scheme = scheme
@@ -364,7 +339,6 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
     outflow = dune.ufl.DirichletBC(
         spcP, [0], x[0] > L - 1e-10
     )
-    #dbc = dune.ufl.DirichletBC(spcU, exact_u)
 
     A_model = rho * ufl.dot(u,v) * ufl.dx + mu * ufl.inner(ufl.grad(u) + ufl.grad(u).T, ufl.grad(v)) * ufl.dx - ufl.dot(f,v) * ufl.dx
     grad_model = -ufl.inner(p*ufl.Identity(grid.dimension), ufl.grad(v)) * ufl.dx
@@ -401,11 +375,10 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
     precon = np.zeros_like(rhs_p)
     chi = np.zeros_like(rhs_u)
 
-    A_op(velocity, rhsVelo) # für randwerte
-    # rhsVelo.plot()
+    A_op(velocity, rhsVelo)
     rhs_u *= -1
     A_op.setConstraints(rhsVelo)
-    sol_u[:] = linalg.spsolve(A, rhs_u) #u = A^-1 * (F-B*p) // but p= 0 //  3.99a
+    sol_u[:] = linalg.spsolve(A, rhs_u)
     
     # trial for parallelization
     # scheme = dune.fem.scheme.galerkin(A == rhs_u, solver='cg',  # sind A_model und rhsVelo falsch gewählt? Alle anderen Möglichkeiten auch error
@@ -418,30 +391,30 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
     # scheme_cls = Scheme1(scheme,u0=velocity)
     # info = scheme_cls.solve(target=velocity)
 
-    rhs_p[:] = B * sol_u # 3.99b, rhs_p = B*u
-    r2 = linalg.spsolve(mass_op, rhs_p) # 3.99b, M * r = rhs_p
-    precon[:] = linalg.spsolve(precondition, rhs_p) # 3.99c, P * precon = rhs_p
-    r2[:]= mu*r2 + precon * rho # 3.99d r = mu * r + rho * precon
-    d = np.copy(r2) # 3.99e, d = r
-    delta = np.dot(r2,rhs_p) # 3.99f, delta = mass * r * mass^-1 *rhs_p
+    rhs_p[:] = B * sol_u
+    r2 = linalg.spsolve(mass_op, rhs_p)
+    precon[:] = linalg.spsolve(precondition, rhs_p)
+    r2[:]= mu*r2 + precon * rho
+    d = np.copy(r2)
+    delta = np.dot(r2,rhs_p)
 
     iterations = 0
     
     while delta > 1e-8 and iterations < 1000:
-        rhs_u[:] = G * d # 3.99g, rhs_u = G * d
-        chi[:] = linalg.spsolve(A, rhs_u) # 3.99g, chi = A^-1 * rhs_u
-        rhs_p[:] = B * chi # wie oben 3.99b
-        scale = - delta/np.dot(d, rhs_p) # 3.99h, rho = - delta / (d * B * chi)
-        sol_p -= scale * d # 3.99i, p = p - rho * d
-        sol_u += scale * chi # 3.99i, u = u + rho * chi
-        rhs_p[:] = B * sol_u # wie oben 3.99b
-        r2 = linalg.spsolve(mass_op, rhs_p) # 3.99k // wie oben 3.99b
-        precon[:] = linalg.spsolve(precondition, rhs_p) # 3.99k // wie oben 3.99c
-        r2[:] = mu*r2 + precon * rho # wie oben 3.99d
-        delta_new = np.dot(r2, rhs_p) # 3.99n, delta_new = r * M * r
-        gamma = delta_new / delta # 3.99o, gamma = delta_new / delta
+        rhs_u[:] = G * d
+        chi[:] = linalg.spsolve(A, rhs_u)
+        rhs_p[:] = B * chi
+        scale = - delta/np.dot(d, rhs_p)
+        sol_p -= scale * d
+        sol_u += scale * chi
+        rhs_p[:] = B * sol_u
+        r2 = linalg.spsolve(mass_op, rhs_p)
+        precon[:] = linalg.spsolve(precondition, rhs_p)
+        r2[:] = mu*r2 + precon * rho
+        delta_new = np.dot(r2, rhs_p)
+        gamma = delta_new / delta
         delta = delta_new
-        d[:] = r2 + gamma * d # 3.99p, d = r + gamma * d
+        d[:] = r2 + gamma * d
         print(f"error at iteration {iterations}: {delta}")
         iterations += 1
     vtk = grid.sequencedVTK("initialization", pointdata=[velocity, pressure])
@@ -452,19 +425,7 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
 
 order = 2
 t_end = 5 #10
-# with pygmsh.occ.Geometry() as geom:
-#     # Domain size
-#     L, H = 2.2, 0.41
-#     r = 0.05
-#     rectangle = geom.add_rectangle([0.0, 0.0, 0.0], L, H)
-#     cylinder = geom.add_disk([0.2, 0.2, 0.0], r)
-#     domain = geom.boolean_difference([rectangle], [cylinder])
-#     mesh = geom.generate_mesh()
-#     points, cells = mesh.points, mesh.cells_dict
-#     domain = {
-#         "vertices": points[:, :2].astype(float),
-#         "simplices": cells["triangle"].astype(int),
-#     }
+
 with pygmsh.geo.Geometry() as geom:
     # Domain size
     L, H = 2.2, 0.41
@@ -513,10 +474,10 @@ vortex_street_grid = (
     else leafGridView({"vertices": [], "cubes": []}, dimgrid=2, lbMethod=lb_method)
 )
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
-vortex_street_grid.hierarchicalGrid.globalRefine(2)
+vortex_street_grid.hierarchicalGrid.globalRefine(4)
 mu.value = 1e-3
 dt.value = 1e-4 #5e-5
-vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt, max_refinement_level=1)
+vortex_solver = NavierStokesSolver(vortex_street_grid, order, mu, rho, dt, max_refinement_level=4)
 no_slip_bottom = dune.ufl.DirichletBC(
     vortex_solver.V_space, [0, 0], vortex_solver.x_u[1] < 1e-10
 )
