@@ -379,17 +379,6 @@ def compute_quasi_stokes_uzawa(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r
     rhs_u *= -1
     A_op.setConstraints(rhsVelo)
     sol_u[:] = linalg.spsolve(A, rhs_u)
-    
-    # trial for parallelization
-    # scheme = dune.fem.scheme.galerkin(A == rhs_u, solver='cg',  # sind A_model und rhsVelo falsch gewählt? Alle anderen Möglichkeiten auch error
-    #               parameters={"linear.preconditioning.method":"jacobi",
-    #                           "nonlinear.forcing":"eisenstatwalker",
-    #                           # this is the default for this forcing
-    #                           "linear.errormeasure":"residualreduction",
-    #                           "nonlinear.tolerance":1e-7},
-    #              )
-    # scheme_cls = Scheme1(scheme,u0=velocity)
-    # info = scheme_cls.solve(target=velocity)
 
     rhs_p[:] = B * sol_u
     r2 = linalg.spsolve(mass_op, rhs_p)
@@ -467,7 +456,6 @@ bisectioncompatibility 1
 domain = (gridReader.dgfString, dgf)
 
 lb_method = 13
-# help(leafGridView)
 vortex_street_grid = (
     leafGridView(domain, dimgrid=2, lbMethod=lb_method)
     if comm.rank == 0
