@@ -35,7 +35,7 @@ class NavierStokesSolver:
         dune.fem.loadBalance([self.solution_u, self.solution_p, self.u_old, self.p_old])
         self.curl = self.calc_curl()
         self.vtk = self.gridView.sequencedVTK(
-            "adapt_curl", pointdata=[self.solution_u, self.solution_p],
+            "adapt_vel", pointdata=[self.solution_u, self.solution_p],
         )
         print(self.gridView.size(0))
         self.vtk()
@@ -96,7 +96,7 @@ class NavierStokesSolver:
             marker.as_numpy[:] -= min_marker
             marker.as_numpy[:] /= (max_marker - min_marker)
         [refined, coarsened] = fem.mark(
-            indicator=self.curl,
+            indicator=marker,
             refineTolerance=0.1,
             coarsenTolerance=0.01,
             maxLevel=self.max_refinement_level,
@@ -284,7 +284,7 @@ def compute_quasi_stokes(rho, vortex_solver, order=2, H=0.41, L=2.2, r=0.05):
 
 
 order = 2
-t_end = 10
+t_end = 2
 with pygmsh.occ.Geometry() as geom:
     # Domain size
     L, H = 2.2, 0.41
@@ -350,6 +350,6 @@ vortex_solver.generate_navier_stokes_schemes(
 )
 print("integrating")
 start = time()
-vortex_solver.integrate(t_end, time_between_plots=0.01)
+vortex_solver.integrate(t_end, time_between_plots=0.1)
 end = time()
 print(f"Integration took {end - start} seconds, with {comm.size} processes")

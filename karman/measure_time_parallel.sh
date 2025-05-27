@@ -1,7 +1,7 @@
 #!/bin/bash
 
-PROCESS_COUNTS=(1 2 4 8 16)
-LOG_FILE="runtime_results.txt"
+PROCESS_COUNTS=(4 8 16)
+LOG_FILE="runtime_results_slow.txt"
 > "$LOG_FILE"
 
 TOTAL_CORES=$(nproc)
