@@ -1,5 +1,7 @@
-# look at first solve only (even only first of icps?), very fine grid, no adaption (not measured anyway)
-# not parallel? because not working. Seriell can start with 
+# look at each step of IPCS separately
+# very fine grid
+# no adaption (not measured anyway)
+# only seriell 
 # no prints or vtks
 
 from dune.alugrid import aluCubeGrid
@@ -77,7 +79,6 @@ class NavierStokesSolver:
                 self.u_old.as_numpy[:] = (
                     np.load("../initial_velocity"+str(shape_u)+".npy") if comm.rank == 0 else None
                 )
-                #assign( #apy
                 self.p_old.as_numpy[:] = (
                     np.load("../initial_pressure"+str(shape_p)+".npy") if comm.rank == 0 else None
                 )
@@ -188,17 +189,21 @@ class NavierStokesSolver:
         )
 
     def perform_one_step(self):
-        #start_time_step_one = time.time()
+        start_time_step_one = time.time()
         self.step_one_scheme.solve(target=self.solution_u)
-        #end_time_step_one = time.time()
-        #print()
-        #print(end_time_step_one-start_time_step_one)
-        # self.vtk()
+        end_time_step_one = time.time()
+        print("Time step one [s]:")
+        print(end_time_step_one-start_time_step_one)
         start_time_step_two = time.time()
         self.step_two_scheme.solve(target=self.solution_p)
         end_time_step_two = time.time()
+        print("Time step two [s]:")
         print(end_time_step_two-start_time_step_two)
+        start_time_step_three = time.time()
         self.step_three_scheme.solve(target=self.solution_u)
+        end_time_step_three = time.time()
+        print("Time step three [s]:")
+        print(end_time_step_three-start_time_step_three)
         self.p_old.as_numpy[:] = self.solution_p.as_numpy[:]
         self.u_old.as_numpy[:] = self.solution_u.as_numpy[:]
 
@@ -250,7 +255,7 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     )
     outflow = dune.ufl.DirichletBC(
         composite_space, [None, None, 0], x[0] > L - 1e-10
-    )  # outflow condition
+    )
 
     params = {"nonlinear.verbose": False, "linear.verbose": False}
 
@@ -274,21 +279,6 @@ def compute_quasi_stokes(rho, mu, vortex_solver, order=2, H=0.41, L=2.2, r=0.05)
     np.save("../initial_pressure"+str(vortex_solver.p_old.as_numpy[:].shape[0])+".npy", solution.as_numpy[indices_split:])
 
 order = 2
-# wrong hole
-# with pygmsh.occ.Geometry() as geom:
-#     # Domain size
-#     L, H = 2.2, 0.41
-#     r = 0.05
-#     rectangle = geom.add_rectangle([0.0, 0.0, 0.0], L, H)
-#     cylinder = geom.add_disk([0.2, 0.2, 0.0], r)
-#     domain = geom.boolean_difference([rectangle], [cylinder])
-#     mesh = geom.generate_mesh()
-#     points, cells = mesh.points, mesh.cells_dict
-#     domain = {
-#         "vertices": points[:, :2].astype(float),
-#         "simplices": cells["triangle"].astype(int),
-#     }
-
 with pygmsh.geo.Geometry() as geom:
     # Domain size
     L, H = 2.2, 0.41
@@ -337,7 +327,7 @@ vortex_street_grid = (
     else leafGridView({"vertices": [], "cubes": []}, dimgrid=2, lbMethod=lb_method)
 )
 vortex_street_grid = fem.view.adaptiveLeafGridView(vortex_street_grid)
-vortex_street_grid.hierarchicalGrid.globalRefine(4)
+vortex_street_grid.hierarchicalGrid.globalRefine(8)
 mu.value = 1e-3
 dt.value = 5e-5
 t_end = 5e-5
