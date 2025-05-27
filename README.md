@@ -1,10 +1,6 @@
 Excercises and Project for the Lecture "Implementierung Finiter Elemente"
 
-Aufteilung:
--Initialisierung: Lisa
--Preconditioner: Lisa
--IPCS: Johannes
--Poiseuille Flow: Johannes
--GMesh: Johannes
--Adaptiv: Marcel
--Parallel: Marcel
+See "parallel" for setup for parallel time analysis.
+Velocity change as marker is there too.
+
+See "precond" for analysis on preconditioning methods
